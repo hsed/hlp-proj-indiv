@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <DebugType>portable</DebugType>
+    <TargetFramework>netcoreapp2.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="EEExtensions.fs"/>
+    <Compile Include="Program.fs"/>
+    <Compile Include="Test.fs"/>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Expecto.FsCheck" Version="5.1.2"/>
+  </ItemGroup>
+</Project>
