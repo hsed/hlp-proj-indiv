@@ -1,3 +1,9 @@
-		mov		r1, #0x100
-		ldr		r0, [r1]
-table1	dcd		1,2,3,4
+		mov		r0, #123
+		
+		mov		r1, #122
+		ror		r1, r1, #1
+		mvn		r1, r1
+		mvn		r1,r1
+		
+		mov		r1, #1
+		lsl		r1, r1, #32

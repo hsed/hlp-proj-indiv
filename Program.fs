@@ -113,7 +113,9 @@ module CommonLex =
         | Cal // the "always executed condition "AL". Used by default on no condition
 
     /// classes of instructions (example, add/change this is needed)
-    type InstrClass = | MEM
+    // ldr/str -> MEMSINGLE
+    // ldm/stm -> MEMMULT
+    type InstrClass = | MEMSINGLE | MEMMULT
 
     /// specification of set of instructions
     type OpSpec = {
@@ -242,22 +244,20 @@ module Memory =
          | NORM //standard offset addressing
          | PRE  //increase R1 by offset (R1'=R1+OFFSET, then look for word in mem[r1']
          | POST //Look for word in mem[r1] then increase r1 (r1'=r1+offset)
-     
-    type Offset = Literal of uint32 //temp for now
 
     // change these types as required
 
     /// instruction (dummy: must change) MUSTTTT
-    type Operand = {Op1: RName; Op2: RName; OpAddr: AddrScheme; OpOff: Offset option;}
-    type Instr =  {InsOpCodeRoot: OpCode; InsOpCodeSuffix: Suffix; InsOperand: Operand}
+    type Operand = {Op1: RName; Op2: RName; OpAddr: AddrScheme; OpOff: Literal option;}
+    type Instr =  {InsOpCodeRoot: OpCode; InsOpCodeSuffix: Suffix; InsOperand: Operand; InsClass: InstrClass}
 
     /// parse error (dummy, but will do)
     type ErrInstr = string
 
     
-
+    //this is main memspec for ldr/str only, for ldm/stm create another...
     let memSpec = {
-        InstrC = MEM
+        InstrC = MEMSINGLE
         Roots = TStrings (OpCodeMap)
         Suffixes = TStrings (SuffixMap)
     }
@@ -283,12 +283,20 @@ module Memory =
     //type LexerState = OP1ST | OP2ST | OFFST | ENDST
     type LexData = { Txt: string; Numb: int}
     (*
-        Accepted token list for opcodes
+        Accepted token list for opcodes 
         OP1 ; LBRA ; OP2 ; RBRA                      => ldr op1, [op2]
         OP1 ; LBRA ; OP2; OFFSET ; RBRA        => ldr op1, [op2, #offset]
         OP1 ; LBRA ; OP2; OFFSET ; RBRA ; EXCL => ldr op1, [op2, #offset]!
         OP1 ; LBRA ; OP2; RBRA; OFFSET         => ldr op1, [op2] #offset
     *)
+
+    //If Arg is supplied "ErrType: ErrArg ErrMsg"
+    //Otherwise "ErrType: ErrMsg"
+    let makeErrorString (errType : string) (errMsg : string) (errArg: 't option) : Result<'T,string> =
+        match errArg with
+        | Some(arg) -> Error(sprintf ("%s: %A %s") errType arg errMsg)
+        | None -> Error(sprintf ("%s: %s") errType errMsg)
+
 
     let (|LexMatch|_|) regex state =
         let debug = false
@@ -321,7 +329,7 @@ module Memory =
         | LexMatch @"^\]" (_, sta) -> retTag RBRA sta
         | LexMatch "^#" (_,sta) -> retTag HASH sta
         | LexMatch "^!" (_,sta) -> retTag EXCL sta
-        | LexMatch @"^\d+" (sym, sta) -> retTag (Token.OFFSET sym) sta
+        | LexMatch @"^0x[0-9a-fA-F]+|\d+" (sym, sta) -> retTag (Token.OFFSET sym) sta
         | _ -> (None, lData)
 
     /// Repeatedly calls nextToken
@@ -345,8 +353,8 @@ module Memory =
     //here we use uint32 when we parse we will parse int32
     let allowedLiterals = 
         [0..2..30] 
-        |> List.allPairs [0u..255u] 
-        |> List.map (fun (lit,n) -> (lit >>> n) + (lit <<< 32-n), {K=lit; R=n/2; I=false})
+        |> List.allPairs [0u..1u..255u] 
+        |> List.map (fun (lit,n) -> (lit >>> n) ||| (lit <<< 32-n), {K=lit; R=n/2; I=false})
         |> List.collect (fun (allowedLitUint32, literal) -> [(allowedLitUint32, literal) ; (~~~(allowedLitUint32), {literal with I=true})]) //generate mvn or arm compatible valid literals
         |> Map.ofList
     
@@ -360,7 +368,8 @@ module Memory =
         rotVal2 k r
 
     let makeLiteral (lit: string) = 
-        let tryFind(num) = match (Map.tryFind (uint32(num)) allowedLiterals) with //direct conversion
+        
+        let tryFind(num) = match (Map.tryFind (num) allowedLiterals) with //direct conversion
                            | Some(x) -> Ok(x)
                            | None -> Error("LiteralParseError: Literal must be producible by rotating right an 8-bit word within a 32-bit word")
         try
@@ -370,77 +379,87 @@ module Memory =
         | :? OverflowException -> Error("LiteralParseError: Literal must be a valid signed int32 number")
         | _ -> Error("LiteralParseError: Unknown errors during parsing function")
         |> function
-           | Ok(x) -> tryFind(x) //(printfn "unsigned value is %A %A" x (tryFind(x))) ; 
+           | Ok(x) -> printfn "lit-string: %A\t\tuint32-val: %A" lit x ; tryFind(x) //(printfn "unsigned value is %A %A" x (tryFind(x))) ; 
            | Error(x) -> Error(x)
 
-        // match Int32.TryParse(lit) with
-        // | (true, num) -> tryFind(num)
-        // | _ -> match Int32.TryParse(lit,NumberStyles.HexNumber,CultureInfo.CreateSpecificCulture("en-US")) with
-        //        | (true, num) -> tryFind(num)
-        //        | _ -> Error("LiteralParseError: Literal must be a valid signed int32 number or 32-bit hex")
-        
 
 
-    //call this validate and make
+    //first it valids a token list 
+    //if the token list is in valid format
+    //it trys to convert each string type token to a d.u type and end result is an operand record
+    //the operand record is then combined with opcodes and other data in the parse function to make an
+    //instruction record which can then be sent to an execution engine
     let makeOperands (tokListR : Result<Token list, string>) : Result<Operand, string> =
         //only call this if valid general format
         let makeOperands' op1Str op2Str (addrType) (offStr : string option) : Result<Operand, string> =
-            match offStr with
-            | None -> match ((Map.tryFind op1Str regNames), (Map.tryFind op2Str regNames), addrType) with
-                      | (Some(op1Reg), Some(op2Reg), NORM) -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=NORM; OpOff=None})
-                      | (_, _, _)-> Error("Unknown error at making operand")
-            | Some(x) -> Error("not implemented")
+            match ((Map.tryFind op1Str regNames), (Map.tryFind op2Str regNames), addrType) with
+            | (Some(op1Reg), Some(op2Reg), _) 
+                    -> match (addrType, offStr) with
+                       | (NORM, None) 
+                            -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=NORM; OpOff=None})
+                       | (_, Some(opOff)) 
+                            -> match makeLiteral(opOff) with
+                                | Ok(lit) -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=addrType; OpOff=Some(lit)})
+                                | Error(x) -> Error(x)
+                       | (_, _) -> (makeErrorString "NoLitError" " addressing type requires a literal" (Some addrType))
+            | (Some(_), None, _) -> makeErrorString ("SrcRegParseError") (" is not a valid register") (Some(op1Str))
+            | (None, Some(_), _) -> makeErrorString ("DestRegParseError") (" is not a valid register") (Some(op1Str))
+            | (_, _, _)-> (makeErrorString "UnknownError" "Unknown error while making operand" None)
 
         match tokListR with
-        | Ok(tokList) -> match tokList with
-                         | OP(op1) :: COMMA :: LBRA :: OP(op2) :: RBRA :: tail
-                            -> match tail with
-                               | [END] -> makeOperands' op1 op2 NORM None //good no offset
-                               | COMMA :: HASH :: OFFSET(off) :: [END] -> makeOperands' op1 op2 POST (Some(off)) //post-indexed
-                               | HASH :: _ -> Error("InvalidSyntaxError: Operands must be comma seperated")
-                               | _ -> Error("InvalidSyntaxError: Incorrect order or too many args")
-                         | OP(op1) :: COMMA :: LBRA :: OP(op2) :: COMMA :: HASH :: OFFSET(off) :: RBRA :: tail
-                            -> match tail with
-                               | [END] -> makeOperands' op1 op2 NORM (Some(off)) //good normal-index
-                               | EXCL :: [END] -> makeOperands' op1 op2 PRE (Some(off)) //good
-                               | _ -> Error("InvalidSyntaxError: Incorrect order or too many args")
-                         | OP(_) :: LBRA :: OP(_) :: _ -> Error("InvalidSyntaxError: Operands must be comma seperated")
-                         | _ -> Error("InvalidSyntaxError: Too few or too many arguments")
-        | Error(x) -> Error(x)
+        | Ok(tokList) 
+            -> match tokList with
+               | OP(op1) :: COMMA :: LBRA :: OP(op2) :: RBRA :: tail
+                  -> match tail with
+                     | [END] ->                                 makeOperands' op1 op2 NORM None //good no offset
+                     | COMMA :: HASH :: OFFSET(off) :: [END] -> makeOperands' op1 op2 POST (Some(off)) //post-indexed
+                     | HASH :: _ ->                             Error("InvalidSyntaxError: Operands must be comma seperated")
+                     | _ ->                                     Error("InvalidSyntaxError: Incorrect order or too many args")
+               | OP(op1) :: COMMA :: LBRA :: OP(op2) :: COMMA :: HASH :: OFFSET(off) :: RBRA :: tail
+                  -> match tail with
+                     | [END] ->                                 makeOperands' op1 op2 NORM (Some(off)) //good normal-index
+                     | EXCL :: [END] ->                         makeOperands' op1 op2 PRE (Some(off)) //good
+                     | _ ->                                     Error("InvalidSyntaxError: Incorrect order or too many args")
+               | OP(_) :: LBRA :: OP(_) :: _ ->                 Error("InvalidSyntaxError: Operands must be comma seperated")
+               | _ ->                                           Error("InvalidSyntaxError: Too few or too many arguments")
+        | Error(x) ->                                           Error(x)
 
-    let parse (ld: LineData) : Result<Parse<Instr>,string> option =
-        let operandString = ld.Operands
-        //printfn "op-string: %A" operandString
+
+
+    ////// ***** main parse function of memory module ****
+    let parse (ld: LineData) : Result<Parse<Instr>,string> option = 
         
+        //this is the module's instruction
+        let genModInstr root suff oper iClass: Instr =
+            {InsOpCodeRoot=root; InsOpCodeSuffix=suff; InsOperand=oper; InsClass=iClass}
 
+        //this is the system-wide instruction ready for execution
+        let genParseInstr cond label instr : Parse<Instr> =
+            {PCond=cond; PInstr=instr; PLabel=label; PSize=4u} //size is always 4u for this module
 
         let parse' (instrC, (root,suffix,pCond)) =
-            //this will only be called if opcode was valid
-            
-            //convert operands to strings using active pattern
-            let oprTokens =
-                tokenize (ld.Operands)
+            let parse'' operands = 
+                match ((Map.tryFind root OpCodeMap), (Map.tryFind suffix SuffixMap)) with
+                | (Some(opC), Some(suff)) -> (genModInstr opC suff operands instrC) |> genParseInstr (pCond) (None) |> Ok
+                | _ -> (makeErrorString "InvalidDataError" "The Opcode/Suffix supplied is invalid." None) //shouldn't happen usually
+            // let oprTokens =
+            //     tokenize (ld.Operands)
 
-            let operands = makeOperands(oprTokens) 
+            // let operands = makeOperands(oprTokens)
 
-            
-            printfn "op-tokens: %A" oprTokens
-            printfn "made operands operands: %A" operands
-            //convert these to valid types 
-            //convert whole thing to an instruction record
-            //see ok { ... } aslast line
-            
-            //also have to validate suffix and operand from string to type!!
-            //that shuld always work really
-            
-            // this does the real work of parsing
-            // dummy return for now
-            //printfn "data avail: %A %A" (ld) (root)
-            Ok { PInstr={InsOpCodeRoot=OpLDR;InsOpCodeSuffix=NoneSuff;InsOperand={Op1=R0;Op2=R1;OpAddr=NORM;OpOff=None}}; PLabel = None ; PSize = 4u; PCond = pCond }
+            ld.Operands
+            |> tokenize
+            |> makeOperands
+            |> Result.bind(parse'')
 
         Map.tryFind ld.OpCode opCodes
-        //if found then send the above for parsing
         |> Option.map parse'
+        //if found then send the above for parsing
+        //it has to be an option
+        //because if it is none then the top level parser will try to look elsewhere
+        //so at the very least the opcode should be the one detected by this module
+        //then it can have ok results or error results 
+        
 
 
 
@@ -485,7 +504,6 @@ module CommonTop =
     //loadAddr is where to load instruction from
     //asmLine is actual string to parse
     let parseLine (symtab: SymbolTable option) (loadAddr: WAddr) (asmLine:string) =
-        printfn "heeeey: %A" 123
         /// put parameters into a LineData record
         let makeLineData opcode operands = {
             OpCode=opcode
