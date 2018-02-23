@@ -82,6 +82,11 @@ module CommonData =
 
     /// type to represent memory
     type MachineMemory<'INS> = Map<WAddr,MemLoc<'INS>>
+open CommonData
+open FsCheck
+open Mono.Cecil.Pdb
+open System
+open System.Globalization
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -218,29 +223,47 @@ module Memory =
         | OpSTR
         // add more
     
+    type Suffix =
+        | BSuff
+        | NoneSuff
+
     //map each string to a valid opcode
     let OpCodeMap = [ "LDR",OpLDR ; "STR",OpSTR ] |> Map.ofList ;
 
+    let SuffixMap = [ "B", BSuff ; "", NoneSuff ] |> Map.ofList ;
+    
+    /// literal value = (K % 256) rotated right by (R % 16)*2
+    type Literal = {K: uint32; R: int; I: bool} // best practice, see later
     //reverse of OpCodeMap and extract strings, used for namespec
-    let OpCodeStrings = 
-        OpCodeMap
+    let TStrings map = 
+        map
         |> Map.toList
         |> List.map fst
         |> List.distinct
     /// sample specification for set of instructions
 
+    type AddrScheme =
+         | NORM //standard offset addressing
+         | PRE  //increase R1 by offset (R1'=R1+OFFSET, then look for word in mem[r1']
+         | POST //Look for word in mem[r1] then increase r1 (r1'=r1+offset)
+     
+    type Offset = Literal of uint32 //temp for now
+
     // change these types as required
 
     /// instruction (dummy: must change) MUSTTTT
-    type Instr =  {MemDummy: unit ; }
+    type Operand = {Op1: RName; Op2: RName; OpAddr: AddrScheme; OpOff: Offset option;}
+    type Instr =  {InsOpCodeRoot: OpCode; InsOpCodeSuffix: Suffix; InsOperand: Operand}
 
     /// parse error (dummy, but will do)
     type ErrInstr = string
 
+    
+
     let memSpec = {
         InstrC = MEM
-        Roots = OpCodeStrings
-        Suffixes = [""; "B"]
+        Roots = TStrings (OpCodeMap)
+        Suffixes = TStrings (SuffixMap)
     }
 
     /// map of all possible opcodes recognised
@@ -258,7 +281,7 @@ module Memory =
                  | RBRA //]
                  | EXCL //!
                  | HASH //#
-                 //| INER COMMA?
+                 | COMMA //,
                  | END
                  | ERROR of string
     //type LexerState = OP1ST | OP2ST | OFFST | ENDST
@@ -296,6 +319,7 @@ module Memory =
         let incr st = {st with Numb = st.Numb+1}
         let retTag tag ld = Some(tag), incr(ld)
         match lData with 
+        | LexMatch "^," (_,sta) -> retTag COMMA sta
         | LexMatch @"^[rR]\d{1,2}" (sym, sta) -> retTag (Token.OP (sym)) sta
         | LexMatch @"^\[" (_,sta) -> retTag LBRA sta
         | LexMatch @"^\]" (_, sta) -> retTag RBRA sta
@@ -314,38 +338,83 @@ module Memory =
                    match nt with
                    | None -> [ERROR(sprintf "LexerMatchFailed at: '%s'" st.Txt)]
                    | Some tok -> tok :: tokenize' st'
-
-        let tokenList = tokenize' {Txt=str;Numb=0}
-        printfn ("ALL TOKENS: %A") tokenList
         
-        tokenList
-        |> List.rev
-        |> List.head
-        |> function //last token should be an error or end
-           | Token.ERROR(s) -> Error(s)
-           | Token.END -> Ok(tokenList)
-           | x -> Error(sprintf "LexerMatchFailed with final token: %A, expected: ERROR or END" x)
+        tokenize' {Txt=str;Numb=0}
+        |> (fun lst -> (lst, List.head (List.rev lst))) //retrieve last token, should be an error or end
+        |> function
+           | (_, Token.ERROR(s)) -> Error(s)
+           | (lst, Token.END) -> Ok(lst)
+           | (_, x) -> Error(sprintf "LexerMatchFailed with final token: %A, expected: ERROR or END" x)
+
+    //here we use uint32 when we parse we will parse int32
+    let allowedLiterals = 
+        [0..2..30] 
+        |> List.allPairs [0u..255u] 
+        |> List.map (fun (lit,n) -> (lit >>> n) + (lit <<< 32-n), {K=lit; R=n/2; I=false})
+        |> List.collect (fun (allowedLitUint32, literal) -> [(allowedLitUint32, literal) ; (~~~(allowedLitUint32), {literal with I=true})]) //generate mvn or arm compatible valid literals
+        |> Map.ofList
+    
+    let litValue {K=k ; R=r; I=i} =
+        let rotVal2 u r =
+            let n = (r &&& 0xF)*2 //(keep n >= 0, % would not do this)
+            let res = (u % 256u >>> n) ||| (u % 256u <<< 32 - n)
+            match i with
+            | true -> ~~~res    //invert result because this was originally the mvn compatible value
+            | false -> res
+        rotVal2 k r
+
+    let makeLiteral (lit: string) = 
+        let tryFind(num) = match (Map.tryFind (uint32(num)) allowedLiterals) with //direct conversion
+                           | Some(x) -> Ok(x)
+                           | None -> Error("LiteralParseError: Literal must be producible by rotating right an 8-bit word within a 32-bit word")
+        try
+            Ok(uint32(int32(lit)))
+        with
+        | :? System.FormatException -> Error("LiteralParseError: Literal must be a valid signed int32 number")
+        | :? OverflowException -> Error("LiteralParseError: Literal must be a valid signed int32 number")
+        | _ -> Error("LiteralParseError: Unknown errors during parsing function")
+        |> function
+           | Ok(x) -> tryFind(x) //(printfn "unsigned value is %A %A" x (tryFind(x))) ; 
+           | Error(x) -> Error(x)
+
+        // match Int32.TryParse(lit) with
+        // | (true, num) -> tryFind(num)
+        // | _ -> match Int32.TryParse(lit,NumberStyles.HexNumber,CultureInfo.CreateSpecificCulture("en-US")) with
+        //        | (true, num) -> tryFind(num)
+        //        | _ -> Error("LiteralParseError: Literal must be a valid signed int32 number or 32-bit hex")
+        
 
 
-    let tokenValidate (tokListR : Result<Token list, string>) : Result<Token list, string> =
+    //call this validate and make
+    let makeOperands (tokListR : Result<Token list, string>) : Result<Operand, string> =
+        //only call this if valid general format
+        let makeOperands' op1Str op2Str (addrType) (offStr : string option) : Result<Operand, string> =
+            match offStr with
+            | None -> match ((Map.tryFind op1Str regNames), (Map.tryFind op2Str regNames), addrType) with
+                      | (Some(op1Reg), Some(op2Reg), NORM) -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=NORM; OpOff=None})
+                      | (_, _, _)-> Error("Unknown error at making operand")
+            | Some(x) -> Error("not implemented")
+
         match tokListR with
         | Ok(tokList) -> match tokList with
-                         | OP(_) :: LBRA :: OP(_) :: RBRA :: tail
+                         | OP(op1) :: COMMA :: LBRA :: OP(op2) :: RBRA :: tail
                             -> match tail with
-                               | [END] -> Ok(tokList) //good
-                               | HASH :: OFFSET(_) :: [END] -> Ok(tokList) //good
+                               | [END] -> makeOperands' op1 op2 NORM None //good no offset
+                               | COMMA :: HASH :: OFFSET(off) :: [END] -> makeOperands' op1 op2 POST (Some(off)) //post-indexed
+                               | HASH :: _ -> Error("InvalidSyntaxError: Operands must be comma seperated")
                                | _ -> Error("InvalidSyntaxError: Incorrect order or too many args")
-                         | OP(_) :: LBRA :: OP(_) :: HASH :: OFFSET(_) :: RBRA :: tail
+                         | OP(op1) :: COMMA :: LBRA :: OP(op2) :: COMMA :: HASH :: OFFSET(off) :: RBRA :: tail
                             -> match tail with
-                               | [END] -> Ok(tokList) //good
-                               | EXCL :: [END] -> Ok(tokList) //good
+                               | [END] -> makeOperands' op1 op2 NORM (Some(off)) //good normal-index
+                               | EXCL :: [END] -> makeOperands' op1 op2 PRE (Some(off)) //good
                                | _ -> Error("InvalidSyntaxError: Incorrect order or too many args")
+                         | OP(_) :: LBRA :: OP(_) :: _ -> Error("InvalidSyntaxError: Operands must be comma seperated")
                          | _ -> Error("InvalidSyntaxError: Too few or too many arguments")
         | Error(x) -> Error(x)
 
     let parse (ld: LineData) : Result<Parse<Instr>,string> option =
         let operandString = ld.Operands
-        printfn "op-string: %A" operandString
+        //printfn "op-string: %A" operandString
         
 
 
@@ -355,20 +424,23 @@ module Memory =
             //convert operands to strings using active pattern
             let oprTokens =
                 tokenize (ld.Operands)
-                |> tokenValidate
+
+            let operands = makeOperands(oprTokens) 
 
             
             printfn "op-tokens: %A" oprTokens
+            printfn "made operands operands: %A" operands
             //convert these to valid types 
             //convert whole thing to an instruction record
             //see ok { ... } aslast line
             
-            
+            //also have to validate suffix and operand from string to type!!
+            //that shuld always work really
             
             // this does the real work of parsing
             // dummy return for now
             //printfn "data avail: %A %A" (ld) (root)
-            Ok { PInstr={MemDummy=()}; PLabel = None ; PSize = 4u; PCond = pCond }
+            Ok { PInstr={InsOpCodeRoot=OpLDR;InsOpCodeSuffix=NoneSuff;InsOperand={Op1=R0;Op2=R1;OpAddr=NORM;OpOff=None}}; PLabel = None ; PSize = 4u; PCond = pCond }
 
         Map.tryFind ld.OpCode opCodes
         //if found then send the above for parsing
@@ -436,8 +508,10 @@ module CommonTop =
         
         /// split line on whitespace into an array
         let splitIntoWords ( line:string ) =
-            line.Split( ([|' '; ','|] : char array), 
-                System.StringSplitOptions.RemoveEmptyEntries) //removes whitespace
+            line.Split( ([||] : char array), 
+                System.StringSplitOptions.RemoveEmptyEntries)
+            // line.Split( ([|' '; ','|] : char array), 
+            //     System.StringSplitOptions.RemoveEmptyEntries) //removes whitespace
         
 
         /// try to parse 1st word, or 2nd word, as opcode
