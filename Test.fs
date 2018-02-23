@@ -169,7 +169,26 @@ module Tests =
 
     [<Tests>]
     let t8 = makeExpectoTestList id id parseAndExec "Mem Tests" [
-                   (("LDR R0, [R1]", emptyMachMemMap.Add(WA(0x100u), DataLoc(0x123u)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u)}) , Ok(emptyMachMemMap, defDataPath))
+                   (("LDR R0, [R1]", emptyMachMemMap.Add(WA(0x100u), DataLoc(0x123u)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u)}) , 
+                    Ok(emptyMachMemMap.Add(WA(0x100u), DataLoc(0x123u)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u).Add(R0, 0x123u)}))
+
+                   (("LDR R0, [R1, #4]", emptyMachMemMap.Add(WA(0x104u), DataLoc(0xF000000Fu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u)}) , 
+                    Ok(emptyMachMemMap.Add(WA(0x104u), DataLoc(0xF000000Fu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u).Add(R0, 0xF000000Fu)}))
+
+                   (("LDR R0, [R1, #3]", emptyMachMemMap.Add(WA(0x104u), DataLoc(0xF000000Fu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u)}) , 
+                    Error("UnalignedWordAddr: LDR/STR instructions require aligned (divisible by 4) word addresses."))
+
+                   (("LDR R0, [R1, #0x10]!", emptyMachMemMap.Add(WA(0x110u), DataLoc(0xFFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u)}) , 
+                    Ok(emptyMachMemMap.Add(WA(0x110u), DataLoc(0xFFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x110u).Add(R0, 0xFFu)}))
+
+                   (("LDR R0, [R1], #0xC", emptyMachMemMap.Add(WA(0x100u), DataLoc(0xFFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u)}) , 
+                    Ok(emptyMachMemMap.Add(WA(0x100u), DataLoc(0xFFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x10Cu).Add(R0, 0xFFu)}))
+                   
+                   (("STR R0, [R1]", emptyMachMemMap, {defDataPath with Regs=defDataPath.Regs.Add(R0, 0xF4FFu).Add(R1, 0x100u)}) , 
+                    Ok(emptyMachMemMap.Add(WA(0x100u), DataLoc(0xF4FFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x100u).Add(R0, 0xF4FFu)}))
+
+                   (("LDRB R0, [R1]", emptyMachMemMap.Add(WA(0x100u), DataLoc(0xF4FFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x101u)}) , 
+                    Ok(emptyMachMemMap.Add(WA(0x100u), DataLoc(0xF4FFu)), {defDataPath with Regs=defDataPath.Regs.Add(R1, 0x101u).Add(R0, 0xF4u)}))
     ]
 
 [<EntryPoint>]

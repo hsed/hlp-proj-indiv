@@ -544,12 +544,33 @@ module Memory =
         let opSuff = instr.PInstr.InsOpCodeSuffix
         let opAddrScheme = instr.PInstr.InsOperand.OpAddr
         let op2Reg = instr.PInstr.InsOperand.Op2
+        let opOff = instr.PInstr.InsOperand.OpOff
+       
 
         let getRegVal (reg : RName) (dP : DataPath) : uint32 =
             match (dP.Regs.TryFind reg) with
                 | Some(x) -> x
                 | None -> 0u //default value if not in map
 
+        let op2RegVal = (getRegVal op2Reg dataPath)
+         
+        let loadByteToReg (destReg: RName) (srcAddr: WAddr) (dP: DataPath) (mem: MachineMemory<Instr>) : Result<(MachineMemory<Instr> * DataPath), string> =
+            //to load byte, reverse back to nearest little endian word-addr, read that and then extract the offset byte
+            let actualAddr = match srcAddr with | WA(x) -> x
+            let relPos = match srcAddr with | WA(x) -> (x % 4u)
+            let alignedAddr = actualAddr - relPos //shuld work relPos = 0,1,2,3
+
+            let extractByte (offSet : int) (word : uint32) : uint32 =
+                //(printfn "Word: %A off: %A Res: %A" word offSet ( (word &&& (0xFFu <<< (8 * offSet))) >>> (8 * offSet)))
+                (word &&& (0xFFu <<< (8 * offSet))) >>> (8 * offSet)
+
+            let makeRec (x) = Ok(mem, {dP with Regs=dP.Regs.Add(destReg, x)})
+
+            match (mem.TryFind (WA alignedAddr)) with
+            | Some(DataLoc(x)) -> (extractByte (int relPos) x) |> (fun z -> (printfn "[DEBUG] [EXEC] OperandStr: %A\n" z) ; z) |> makeRec
+            | Some(Code(_)) -> Error("ProtMemAccessError: Reading data from instruction memory space is not allowed.")
+            | None -> Ok(mem, {dP with Regs=dP.Regs.Add(destReg, 0u)}) //default value if not in map
+        
         let loadWordToReg (destReg: RName) (srcAddr: WAddr) (dP: DataPath) (mem: MachineMemory<Instr>) : Result<(MachineMemory<Instr> * DataPath), string> =
             match srcAddr with
             | WA(x) when (x % 4u = 0u) -> match (mem.TryFind srcAddr) with
@@ -569,23 +590,40 @@ module Memory =
             | Lit(x) -> litValue(x)
             | Reg(x) -> (getRegVal x dP)
         
+
+        let addValToReg (reg) (dP : DataPath) (x : uint32) =
+            let newRegVal = (getRegVal reg dP) + x
+            (newRegVal , {dP with Regs=dP.Regs.Add(reg, newRegVal)})
+        
         //the final value of the index
         let calcWAddrVal (baseVal: uint32) (offVal: uint32) : WAddr =
             WA(baseVal + offVal)
 
         //Once final WAddr is calculated, this is called
-        let exec' (wAddr : WAddr) (dP: DataPath) (mem: MachineMemory<Instr>) : Result<(MachineMemory<Instr> * DataPath), string> =
+        let exec' (dP: DataPath) (mem: MachineMemory<Instr>) (wAddr : WAddr) : Result<(MachineMemory<Instr> * DataPath), string> =
             match opRoot with
             | OpLDR -> match opSuff with
-                       | NoneSuff -> match opAddrScheme with
-                                     | NORM -> (loadWordToReg op1Reg wAddr dP mem) 
-        
-        match isCondTrue dataPath.Fl instr.PCond with
-        | false -> Ok(memMap, dataPath) //return data with no changes as condition for exec was not met!
-        | true -> match instr.PInstr.InsOperand.OpOff with
-                  | None -> (exec' (calcWAddrVal (getRegVal instr.PInstr.InsOperand.Op2 dataPath) 0u) dataPath memMap)
+                       | NoneSuff -> loadWordToReg op1Reg wAddr dP mem
+                       | BSuff ->    loadByteToReg op1Reg wAddr dP mem 
+            | OpSTR -> match opSuff with
+                       | NoneSuff -> storeWordToMem op1Reg wAddr dP mem
+                       | BSuff ->    Error("STRB is not currelty implemented")
         
 
+        //main match
+        match isCondTrue dataPath.Fl instr.PCond with
+        | false -> Ok(memMap, dataPath) //return data with no changes as condition for exec was not met!
+        | true -> match opOff with
+                  | _ when (op1Reg = op2Reg) -> Error("Source and Dest operands must be different for mem instructions")
+                  | None -> (exec' dataPath memMap (calcWAddrVal op2RegVal 0u))
+                  | Some(Offset.Lit(x)) -> match opAddrScheme with
+                                           | NORM -> x |> litValue |> calcWAddrVal op2RegVal |> exec' dataPath memMap
+                                           | PRE -> x |> litValue |> (addValToReg op2Reg dataPath) |> (fun (newReg, newDP) -> exec' newDP memMap (calcWAddrVal newReg 0u))
+                                           | POST -> x |> litValue |> (addValToReg op2Reg dataPath) |> (fun (_, newDP) -> exec' newDP memMap (calcWAddrVal op2RegVal 0u))
+                  | Some(Offset.Reg(x)) -> match opAddrScheme with
+                                           | NORM -> (getRegVal x dataPath) |> calcWAddrVal op2RegVal |> exec' dataPath memMap
+                                           | PRE -> (getRegVal x dataPath) |> (addValToReg op2Reg dataPath) |> (fun (newReg, newDP) -> exec' newDP memMap (calcWAddrVal newReg 0u))
+                                           | POST -> (getRegVal x dataPath) |> (addValToReg op2Reg dataPath) |> (fun (_, newDP) -> exec' newDP memMap (calcWAddrVal op2RegVal 0u))
 ////////////////////////////////////////////////////////////////////////////////////
 //      Code defined at top level after the instruction processing modules
 ////////////////////////////////////////////////////////////////////////////////////
