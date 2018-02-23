@@ -1,6 +1,9 @@
 ﻿// Learn more about F# at http://fsharp.org
 namespace Program
 
+open EEExtensions
+open Mono.Cecil.Cil
+
 module CommonData =
     //////////////////////////////////////////////////////////////////////////////////////
     //                   Common types and code used by all modules
@@ -215,6 +218,13 @@ module Memory =
     open CommonLex
     open EEExtensions
 
+    let debug = false
+
+    let LitParErrRor8 = Error("LiteralParseError: Literal must be producible by rotating right an 8-bit word")
+    let LitParErrInvalid = Error("LiteralParseError: Literal must be a valid signed int32 number")
+
+    let InvalidSynComma = Error("InvalidSyntaxError: Operands must be comma seperated")
+
     //valid aka avail opcodes
     type OpCode =
         | OpLDR
@@ -245,10 +255,16 @@ module Memory =
          | PRE  //increase R1 by offset (R1'=R1+OFFSET, then look for word in mem[r1']
          | POST //Look for word in mem[r1] then increase r1 (r1'=r1+offset)
 
+    type OffScheme =
+         | LIT | REG
+    //only literals and reg are supported now, shifted types in group stage as shifts are handled by other members
+    type Offset =
+         | Lit of Literal
+         | Reg of RName
     // change these types as required
 
     /// instruction (dummy: must change) MUSTTTT
-    type Operand = {Op1: RName; Op2: RName; OpAddr: AddrScheme; OpOff: Literal option;}
+    type Operand = {Op1: RName; Op2: RName; OpAddr: AddrScheme; OpOff: Offset option;}
     type Instr =  {InsOpCodeRoot: OpCode; InsOpCodeSuffix: Suffix; InsOperand: Operand; InsClass: InstrClass}
 
     /// parse error (dummy, but will do)
@@ -290,27 +306,47 @@ module Memory =
         OP1 ; LBRA ; OP2; RBRA; OFFSET         => ldr op1, [op2] #offset
     *)
 
-    //If Arg is supplied "ErrType: ErrArg ErrMsg"
-    //Otherwise "ErrType: ErrMsg"
+    //helper function to initial dataPath
+    let defDataPath =
+        {
+            Fl={
+                N=false;
+                C=false;
+                V=false;
+                Z=false;
+            };
+            Regs=
+                regNums //returns list of all regs with their integer couterpart
+                |> Map.toList
+                |> List.map (fun (rname, _) -> (rname, 0u)) //initialise all to zero
+                |> Map.ofList
+        }
+
+    //this is a generic empty map which can be copied to new maps with added key,values etc
+    let emptyMachMemMap : MachineMemory<Instr> = Map.empty<WAddr,MemLoc<Instr>>
+    
+    
+
     let makeErrorString (errType : string) (errMsg : string) (errArg: 't option) : Result<'T,string> =
         match errArg with
-        | Some(arg) -> Error(sprintf ("%s: %A %s") errType arg errMsg)
+        | Some(arg) ->  (String.replace "\""  "" (errType + (sprintf(@": '%A' ") arg) + errMsg))
+                        |> Error
         | None -> Error(sprintf ("%s: %s") errType errMsg)
 
 
     let (|LexMatch|_|) regex state =
-        let debug = false
+        //let debug = true
 
         match String.regexMatch regex state.Txt with
         | None -> if debug 
-                  then printfn "Match of '%s' with '%s' failed." state.Txt regex; 
+                  then printfn "[DEBUG] [PARSE] Match of '%s' with '%s' failed." state.Txt regex; 
                   None
         | Some (mStr, _) -> 
             let mChars = String.length mStr
             if mChars = 0 then 
                 failwithf "What? Unexpected 0 character match in LexMatch '%s'" regex
             if debug then
-                printfn "Match of '%s' with '%s' OK: match is '%s" state.Txt regex mStr; 
+                printfn "[DEBUG] [PARSE] Match of '%s' with '%s' OK: match is '%s" state.Txt regex mStr; 
             let state' = {state with Txt = state.Txt.[mChars..]}
             Some (mStr,state')
 
@@ -324,7 +360,7 @@ module Memory =
         let retTag tag ld = Some(tag), incr(ld)
         match lData with 
         | LexMatch "^," (_,sta) -> retTag COMMA sta
-        | LexMatch @"^[rR]\d{1,2}" (sym, sta) -> retTag (Token.OP (sym)) sta
+        | LexMatch @"^(?i)(R\d{1,2}|LR)" (sym, sta) -> retTag (Token.OP (sym)) sta  //make everything lowercase, capture r0-r99 | lr, pc and sp not allowed
         | LexMatch @"^\[" (_,sta) -> retTag LBRA sta
         | LexMatch @"^\]" (_, sta) -> retTag RBRA sta
         | LexMatch "^#" (_,sta) -> retTag HASH sta
@@ -357,6 +393,7 @@ module Memory =
         |> List.map (fun (lit,n) -> (lit >>> n) ||| (lit <<< 32-n), {K=lit; R=n/2; I=false})
         |> List.collect (fun (allowedLitUint32, literal) -> [(allowedLitUint32, literal) ; (~~~(allowedLitUint32), {literal with I=true})]) //generate mvn or arm compatible valid literals
         |> Map.ofList
+        //|> Map.filter (fun key _ -> (key % 4u = 0u)) //for mem offset, val must be divisible by four! ***NOTE: This is now done during exec cause strb has no prob with it
     
     let litValue {K=k ; R=r; I=i} =
         let rotVal2 u r =
@@ -371,7 +408,7 @@ module Memory =
         
         let tryFind(num) = match (Map.tryFind (num) allowedLiterals) with //direct conversion
                            | Some(x) -> Ok(x)
-                           | None -> Error("LiteralParseError: Literal must be producible by rotating right an 8-bit word within a 32-bit word")
+                           | None -> LitParErrRor8
         try
             Ok(uint32(int32(lit)))
         with
@@ -379,10 +416,11 @@ module Memory =
         | :? OverflowException -> Error("LiteralParseError: Literal must be a valid signed int32 number")
         | _ -> Error("LiteralParseError: Unknown errors during parsing function")
         |> function
-           | Ok(x) -> printfn "lit-string: %A\t\tuint32-val: %A" lit x ; tryFind(x) //(printfn "unsigned value is %A %A" x (tryFind(x))) ; 
+           | Ok(x) -> (*printfn "lit-string: %A\t\tuint32-val: %A" lit x ;*) tryFind(x) //(printfn "unsigned value is %A %A" x (tryFind(x))) ; 
            | Error(x) -> Error(x)
 
 
+    //let makeOffset = 
 
     //first it valids a token list 
     //if the token list is in valid format
@@ -391,19 +429,23 @@ module Memory =
     //instruction record which can then be sent to an execution engine
     let makeOperands (tokListR : Result<Token list, string>) : Result<Operand, string> =
         //only call this if valid general format
-        let makeOperands' op1Str op2Str (addrType) (offStr : string option) : Result<Operand, string> =
+        let makeOperands' op1Str op2Str (addrType) (offStr : (string * OffScheme) option) : Result<Operand, string> =
             match ((Map.tryFind op1Str regNames), (Map.tryFind op2Str regNames), addrType) with
             | (Some(op1Reg), Some(op2Reg), _) 
                     -> match (addrType, offStr) with
                        | (NORM, None) 
                             -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=NORM; OpOff=None})
-                       | (_, Some(opOff)) 
-                            -> match makeLiteral(opOff) with
-                                | Ok(lit) -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=addrType; OpOff=Some(lit)})
-                                | Error(x) -> Error(x)
+                       | (_, Some(opOff,offType)) 
+                            -> match (offType) with
+                               | LIT -> match makeLiteral(opOff) with
+                                        | Ok(lit) -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=addrType; OpOff=Some(Lit(lit))})
+                                        | Error(x) -> Error(x)
+                               | REG -> match (Map.tryFind opOff regNames) with
+                                        | Some(op3) -> Ok({Op1=op1Reg; Op2=op2Reg; OpAddr=addrType; OpOff=Some(Reg(op3))})
+                                        | None -> makeErrorString ("Op3RegParseError") ("is not a valid register") (Some(op1Str))
                        | (_, _) -> (makeErrorString "NoLitError" " addressing type requires a literal" (Some addrType))
-            | (Some(_), None, _) -> makeErrorString ("SrcRegParseError") (" is not a valid register") (Some(op1Str))
-            | (None, Some(_), _) -> makeErrorString ("DestRegParseError") (" is not a valid register") (Some(op1Str))
+            | (Some(_), None, _) -> makeErrorString ("SrcRegParseError") ("is not a valid register") (Some(op1Str))
+            | (None, Some(_), _) -> makeErrorString ("DestRegParseError") ("is not a valid register") (Some(op1Str))
             | (_, _, _)-> (makeErrorString "UnknownError" "Unknown error while making operand" None)
 
         match tokListR with
@@ -412,15 +454,21 @@ module Memory =
                | OP(op1) :: COMMA :: LBRA :: OP(op2) :: RBRA :: tail
                   -> match tail with
                      | [END] ->                                 makeOperands' op1 op2 NORM None //good no offset
-                     | COMMA :: HASH :: OFFSET(off) :: [END] -> makeOperands' op1 op2 POST (Some(off)) //post-indexed
-                     | HASH :: _ ->                             Error("InvalidSyntaxError: Operands must be comma seperated")
+                     | COMMA :: HASH :: OFFSET(off) :: [END] -> makeOperands' op1 op2 POST (Some(off, LIT)) //post-indexed
+                     | COMMA :: OP(op3) :: [END] -> makeOperands' op1 op2 POST (Some(op3, REG))
+                     | HASH :: _ ->                             InvalidSynComma
                      | _ ->                                     Error("InvalidSyntaxError: Incorrect order or too many args")
                | OP(op1) :: COMMA :: LBRA :: OP(op2) :: COMMA :: HASH :: OFFSET(off) :: RBRA :: tail
                   -> match tail with
-                     | [END] ->                                 makeOperands' op1 op2 NORM (Some(off)) //good normal-index
-                     | EXCL :: [END] ->                         makeOperands' op1 op2 PRE (Some(off)) //good
+                     | [END] ->                                 makeOperands' op1 op2 NORM (Some(off, LIT)) //good normal-index
+                     | EXCL :: [END] ->                         makeOperands' op1 op2 PRE (Some(off, LIT)) //good
                      | _ ->                                     Error("InvalidSyntaxError: Incorrect order or too many args")
-               | OP(_) :: LBRA :: OP(_) :: _ ->                 Error("InvalidSyntaxError: Operands must be comma seperated")
+               | OP(op1) :: COMMA :: LBRA :: OP(op2) :: COMMA :: OP(op3) :: RBRA :: tail
+                  -> match tail with
+                     | [END] ->                                 makeOperands' op1 op2 NORM (Some(op3, REG)) //good normal-index
+                     | EXCL :: [END] ->                         makeOperands' op1 op2 PRE (Some(op3, REG)) //good
+                     | _ ->                                     Error("InvalidSyntaxError: Incorrect order or too many args")
+               | OP(_) :: LBRA :: OP(_) :: _ ->                 InvalidSynComma
                | _ ->                                           Error("InvalidSyntaxError: Too few or too many arguments")
         | Error(x) ->                                           Error(x)
 
@@ -447,10 +495,10 @@ module Memory =
 
             // let operands = makeOperands(oprTokens)
 
-            ld.Operands
-            |> tokenize
-            |> makeOperands
-            |> Result.bind(parse'')
+            ld.Operands             |> (fun x -> (match debug with | true -> printfn "[DEBUG] [PARSE] OperandStr: %A\n" x | false -> ()) ; x)
+            |> tokenize             |> (fun x -> (match debug with | true -> printfn "[DEBUG] [PARSE] Tokens: %A\n" x | false -> ()) ; x)
+            |> makeOperands         |> (fun x -> (match debug with | true -> printfn "[DEBUG] [PARSE] Operands: %A\n" x | false -> ()) ; x)
+            |> Result.bind(parse'') |> (fun x -> (match debug with | true -> printfn "[DEBUG] [PARSE] Parse Result: %A\n" x | false -> ()) ; x)
 
         Map.tryFind ld.OpCode opCodes
         |> Option.map parse'
@@ -465,6 +513,78 @@ module Memory =
 
     /// Parse Active Pattern used by top-level code
     let (|IMatch|_|)  = parse
+
+    let isCondTrue (fl : Flags) (c: Condition) : bool = 
+        match c with
+        | Ceq -> fl.Z
+        | Cne -> not fl.Z
+        | Cmi -> fl.N
+        | Cpl -> not fl.N
+        | Chi -> fl.C && (not fl.Z)
+        | Chs -> fl.C
+        | Clo -> not fl.C
+        | Cls -> (not fl.C) || fl.Z
+        | Cge -> (fl.N = fl.V)
+        | Cgt -> (not fl.Z) && (fl.N = fl.V)
+        | Cle -> (fl.N <> fl.V) || fl.Z
+        | Clt -> (fl.N <> fl.V)
+        | Cvs -> fl.V
+        | Cvc -> not fl.V
+        | Cnv -> false
+        | Cal -> true    
+
+    ///main execute stage
+    //takes in parsed instr, memMap, dataPath and return a tuple of updated memMap and dataPath as result
+    let execute (instr: Parse<Instr>) (memMap : MachineMemory<Instr>) (dataPath : DataPath) : Result<(MachineMemory<Instr> * DataPath), string>=
+        match debug with | true -> printfn "[DEBUG] [EXEC] MemMap: %A\n" memMap | false -> ()
+        match debug with | true -> printfn "[DEBUG] [EXEC] dataPath: %A\n" dataPath | false -> ()
+
+        let op1Reg = instr.PInstr.InsOperand.Op1
+        let opRoot = instr.PInstr.InsOpCodeRoot
+        let opSuff = instr.PInstr.InsOpCodeSuffix
+        let opAddrScheme = instr.PInstr.InsOperand.OpAddr
+        let op2Reg = instr.PInstr.InsOperand.Op2
+
+        let getRegVal (reg : RName) (dP : DataPath) : uint32 =
+            match (dP.Regs.TryFind reg) with
+                | Some(x) -> x
+                | None -> 0u //default value if not in map
+
+        let loadWordToReg (destReg: RName) (srcAddr: WAddr) (dP: DataPath) (mem: MachineMemory<Instr>) : Result<(MachineMemory<Instr> * DataPath), string> =
+            match srcAddr with
+            | WA(x) when (x % 4u = 0u) -> match (mem.TryFind srcAddr) with
+                                          | Some(DataLoc(x)) -> Ok(mem, {dP with Regs=dP.Regs.Add(destReg, x)})
+                                          | Some(Code(_)) -> Error("ProtMemAccessError: Reading data from instruction memory space is not allowed.")
+                                          | None -> Ok(mem, {dP with Regs=dP.Regs.Add(destReg, 0u)}) //default value if not in map
+            | _ -> Error("UnalignedWordAddr: LDR/STR instructions require aligned (divisible by 4) word addresses.")
+
+        let storeWordToMem (srcReg: RName) (destAddr: WAddr) (dP: DataPath) (mem: MachineMemory<Instr>) : Result<(MachineMemory<Instr> * DataPath), string> =
+            match destAddr with
+            | WA(x) when (x % 4u = 0u) -> Ok(mem.Add(destAddr, DataLoc(getRegVal srcReg dP)), dP)
+            | _ -> Error("UnalignedWordAddr: LDR/STR instructions require aligned (divisible by 4) word addresses.")
+           
+        //calc offset value as uint32, must convert to int32 when doing arithmetic to get correct required index i.e. WAddr
+        let calcOffVal (off : Offset) (dP : DataPath) : uint32 =
+            match off with
+            | Lit(x) -> litValue(x)
+            | Reg(x) -> (getRegVal x dP)
+        
+        //the final value of the index
+        let calcWAddrVal (baseVal: uint32) (offVal: uint32) : WAddr =
+            WA(baseVal + offVal)
+
+        //Once final WAddr is calculated, this is called
+        let exec' (wAddr : WAddr) (dP: DataPath) (mem: MachineMemory<Instr>) : Result<(MachineMemory<Instr> * DataPath), string> =
+            match opRoot with
+            | OpLDR -> match opSuff with
+                       | NoneSuff -> match opAddrScheme with
+                                     | NORM -> (loadWordToReg op1Reg wAddr dP mem) 
+        
+        match isCondTrue dataPath.Fl instr.PCond with
+        | false -> Ok(memMap, dataPath) //return data with no changes as condition for exec was not met!
+        | true -> match instr.PInstr.InsOperand.OpOff with
+                  | None -> (exec' (calcWAddrVal (getRegVal instr.PInstr.InsOperand.Op2 dataPath) 0u) dataPath memMap)
+        
 
 ////////////////////////////////////////////////////////////////////////////////////
 //      Code defined at top level after the instruction processing modules
@@ -558,6 +678,6 @@ module CommonTop =
         |> removeComment
         |> splitIntoWords
         |> Array.toList
-        //|> printfn "val: %A"
         |> matchLine
 
+    
