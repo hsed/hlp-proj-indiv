@@ -82,11 +82,6 @@ module CommonData =
 
     /// type to represent memory
     type MachineMemory<'INS> = Map<WAddr,MemLoc<'INS>>
-open CommonData
-open FsCheck
-open Mono.Cecil.Pdb
-open System
-open System.Globalization
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -213,7 +208,8 @@ module CommonLex =
 ///***************MEMORY MODULE ***************///
 
 module Memory =
-
+    open System
+    open CommonData
     open CommonLex
     open EEExtensions
 
