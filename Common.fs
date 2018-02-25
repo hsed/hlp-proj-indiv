@@ -1,12 +1,11 @@
-//////////////////////////////////////////////////////////////////////////////////////////
-//                                  INITPROJECTLEXER                                    //
-//////////////////////////////////////////////////////////////////////////////////////////
+﻿// Learn more about F# at http://fsharp.org
+namespace Common
 
-(*
-    Change Log
-    v1.00 initial version
-    v1.01 deleted duplicate "" suffix in condmap
-*)
+open EEExtensions
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//                     Common code for Instruction Definition and Parsing
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 module CommonData =
     //////////////////////////////////////////////////////////////////////////////////////
@@ -76,7 +75,7 @@ module CommonData =
     /// needed because instruction type is only defined
     /// at top level.
     type MemLoc<'INS> =
-        | DataLoc of uint32
+        | DataLoc of uint32 //we will usually use this one for now
         | Code of 'INS
 
     /// type to represent a (word) address
@@ -85,17 +84,10 @@ module CommonData =
     /// or does it contain the word number (real address dvided by 4)
     /// either way multiply/divide by 4 will cause problems!
     /// document this well and be consistent.
-
-    /// go with real address for WAddr
     type WAddr = | WA of uint32
 
     /// type to represent memory
     type MachineMemory<'INS> = Map<WAddr,MemLoc<'INS>>
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-//                     Common code for Instruction Definition and Parsing
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 module CommonLex =
 
@@ -122,7 +114,9 @@ module CommonLex =
         | Cal // the "always executed condition "AL". Used by default on no condition
 
     /// classes of instructions (example, add/change this is needed)
-    type InstrClass = | DP | MEM
+    // ldr/str -> MEMSINGLE
+    // ldm/stm -> MEMMULT
+    type InstrClass = | MEMSINGLE | MEMMULT
 
     /// specification of set of instructions
     type OpSpec = {
@@ -131,7 +125,7 @@ module CommonLex =
         Suffixes: string list
     }
 
-    type SymbolTable = Map<string,uint32>
+    type SymbolTable = Map<string,uint32> //value must be a valid WAddr
 
     /// result returned from instruction-specific module parsing
     /// an instruction class. If symbol definitions are found in a 
@@ -141,7 +135,7 @@ module CommonLex =
             /// value representing instruction. NB type varies with instruction class
             PInstr: 'INS 
             /// name and value of label defined on this line, if one is.
-            PLabel: (string * uint32) option 
+            PLabel: (string * uint32) option //this will be given to symbol table?
             /// number of bytes in memory taken up by this instruction
             PSize: uint32 
             /// execution condition for instruction
@@ -203,187 +197,13 @@ module CommonLex =
             // Note subtle point. {pr with Pinst = ...} will not work here
             // That is because applying fmap changes the type of PInstr
             // and therefore the type of the record.
+
+
+            //this is a result of type Parse
             Ok {
-            PInstr = fMap ins 
+            PInstr = fMap ins  //parsedInstruction: LDR, STR, etc.
             PLabel = pr.PLabel
             PCond = pr.PCond
             PSize = pr.PSize
             }
         | Error e -> Error (fMapE e)
-
-//////////////////////////////////////////////////////////////////////////////////////////
-//                   Sample (skeleton) instruction implementation modules
-//////////////////////////////////////////////////////////////////////////////////////////
-
-module DP =
-
-    open CommonLex
-
-    // change these types as required
-
-    /// instruction (dummy: must change)
-    type Instr =  {DPDummy: Unit}
-
-    /// parse error (dummy, but will do)
-    type ErrInstr = string
-
-    /// sample specification for set of instructions
-    /// very incomplete!
-    let dPSpec = {
-        InstrC = DP
-        Roots = ["ADD";"SUB"]
-        Suffixes = [""; "S"]
-    }
-
-    /// map of all possible opcodes recognised
-    let opCodes = opCodeExpand dPSpec
-
-    /// main function to parse a line of assembler
-    /// ls contains the line input
-    /// and other state needed to generate output
-    /// the result is None if the opcode does not match
-    /// otherwise it is Ok Parse or Error (parse error string)
-    let parse (ls: LineData) : Result<Parse<Instr>,string> option =
-        let parse' (instrC, (root,suffix,pCond)) =
-            // this does the real work of parsing
-            // dummy return for now
-            Ok { PInstr={DPDummy=()}; PLabel = None ; PSize = 4u; PCond = pCond }
-        Map.tryFind ls.OpCode opCodes
-        |> Option.map parse'
-
-
-    /// Parse Active Pattern used by top-level code
-    let (|IMatch|_|) = parse
-
-
-module Memory =
-
-    open CommonLex
-
-    /// sample specification for set of instructions
-
-    // change these types as required
-
-    /// instruction (dummy: must change)
-    type Instr =  {MemDummy: Unit}
-
-    /// parse error (dummy, but will do)
-    type ErrInstr = string
-
-    let memSpec = {
-        InstrC = MEM
-        Roots = ["LDR";"STR"]
-        Suffixes = [""; "B"]
-    }
-
-    /// map of all possible opcodes recognised
-    let opCodes = opCodeExpand memSpec
-
-    /// main function to parse a line of assembler
-    /// ls contains the line input
-    /// and other state needed to generate output
-    /// the result is None if the opcode does not match
-    /// otherwise it is Ok_Parse or Error_(parse error string)
-
-    let parse (ls: LineData) : Result<Parse<Instr>,string> option =
-        let parse' (instrClass, (root,suffix,pCond)) =
-            // this does the real work of parsing
-            // dummy return for now
-            Ok { PInstr={MemDummy=()}; PLabel = None ; PSize = 4u; PCond = pCond }
-        Map.tryFind ls.OpCode opCodes
-        |> Option.map parse'
-
-
-
-    /// Parse Active Pattern used by top-level code
-    let (|IMatch|_|)  = parse
-
-////////////////////////////////////////////////////////////////////////////////////
-//      Code defined at top level after the instruction processing modules
-////////////////////////////////////////////////////////////////////////////////////
-module CommonTop =
-
-    open CommonLex
-    open CommonData
-
-    /// allows different modules to return different instruction types
-    type Instr =
-        | IMEM of Memory.Instr
-        | IDP of DP.Instr
-    
-    /// allows different modules to return different error info
-    /// by default all return string so this is not needed
-    type ErrInstr =
-        | ERRIMEM of Memory.ErrInstr
-        | ERRIDP of DP.ErrInstr
-        | ERRTOPLEVEL of string
-
-    /// Note that Instr in Mem and DP modules is NOT same as Instr in this module
-    /// Instr here is all possible isntruction values combines with a D.U.
-    /// that tags the Instruction class
-    /// Similarly ErrInstr
-    /// Similarly IMatch here is combination of module IMatches
-    let IMatch (ld: LineData) : Result<Parse<Instr>,ErrInstr> option =
-        let pConv fr fe p = pResultInstrMap fr fe p |> Some
-        match ld with
-        | Memory.IMatch pa -> pConv IMEM ERRIMEM pa
-        | DP.IMatch pa -> pConv IDP ERRIDP pa
-        | _ -> None
-    
-    
-
-    type CondInstr = Condition * Instr
-
-    let parseLine (symtab: SymbolTable option) (loadAddr: WAddr) (asmLine:string) =
-        /// put parameters into a LineData record
-        let makeLineData opcode operands = {
-            OpCode=opcode
-            Operands=String.concat "" operands
-            Label=None
-            LoadAddr = loadAddr
-            SymTab = symtab
-        }
-        /// remove comments from string
-        let removeComment (txt:string) =
-            txt.Split(';')
-            |> function 
-                | [|x|] -> x 
-                | [||] -> "" 
-                | lineWithComment -> lineWithComment.[0]
-        /// split line on whitespace into an array
-        let splitIntoWords ( line:string ) =
-            line.Split( ([||] : char array), 
-                System.StringSplitOptions.RemoveEmptyEntries)
-        /// try to parse 1st word, or 2nd word, as opcode
-        /// If 2nd word is opcode 1st word must be label
-        let matchLine words =
-            let pNoLabel =
-                match words with
-                | opc :: operands -> 
-                    makeLineData opc operands 
-                    |> IMatch
-                | _ -> None
-            match pNoLabel, words with
-            | Some pa, _ -> pa
-            | None, label :: opc :: operands -> 
-                match { makeLineData opc operands 
-                        with Label=Some label} 
-                      |> IMatch with
-                | None -> 
-                    Error (ERRTOPLEVEL (sprintf "Unimplemented instruction %s" opc))
-                | Some pa -> pa
-            | _ -> Error (ERRTOPLEVEL (sprintf "Unimplemented instruction %A" words))
-        asmLine
-        |> removeComment
-        |> splitIntoWords
-        |> Array.toList
-        |> matchLine
-    
-
-open CommonTop
-open CommonData
-/// test the initProjectLexer code
-let test = parseLine None (WA 0u)
-
-
-

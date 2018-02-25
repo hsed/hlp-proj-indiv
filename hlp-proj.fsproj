@@ -6,8 +6,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="EEExtensions.fs"/>
-    <Compile Include="Program.fs"/>
-    <Compile Include="Test.fs"/>
+    <Compile Include="Common.fs"/>
+    <Compile Include="Memory.fs"/>
+    <Compile Include="CommonTop.fs"/>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Expecto.FsCheck" Version="5.1.2"/>
