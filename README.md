@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-# hlp-proj
-This repo is for HLP 17-18 Project files. The project files during the course are confidential.
-=======
 # HLP Individual Project
 ## Introduction
 This repo contains fsharp source files to run and test a part of the ARM simulator. The code has been modularised and the main working module is `Memory` which can be found in `Program.fs` in the root directory.
@@ -62,5 +58,4 @@ The module currently implements two main functions: `parse` and `execute`. It ca
 - Currently, only unit tests are implemented due to time limitations.
 - There are currently 40 tests and all pass as shown in the screenshot below.
 
-<img src="test.png" />
->>>>>>> 94b16d4... last changes
+<img src="tests.png" />
