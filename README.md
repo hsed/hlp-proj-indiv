@@ -62,9 +62,5 @@ The module currently implements two main functions: `parse` and `execute`. It ca
 - Currently, only unit tests are implemented due to time limitations.
 - There are currently 40 tests and all pass as shown in the screenshot below.
 
-<<<<<<< HEAD
 <img src="test.png" />
 >>>>>>> 94b16d4... last changes
-=======
-<img src="tests.png" />
->>>>>>> 501a4c4... more
